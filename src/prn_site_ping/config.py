@@ -57,6 +57,26 @@ def load_printers(config_path: str | None = None) -> list[str]:
         ) from e
 
 
+def resolve_printers_path(config_path: str | None = None) -> Path:
+    """Resolve a writable path for the printers list."""
+    if config_path:
+        return Path(config_path)
+
+    env = os.environ.get(ENV_CONFIG_PATH)
+    if env:
+        return Path(env)
+
+    return Path.cwd() / "config" / "printers.local.txt"
+
+
+def write_printers_file(path: Path | str, printers: list[str]) -> None:
+    """Write printer names to a file, one per line."""
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    content = "\n".join(printers) + ("\n" if printers else "")
+    p.write_text(content, encoding="utf-8")
+
+
 def read_printers_file(path: Path | str) -> list[str]:
     """Parse a printers file (public helper, handy for tests).
 
