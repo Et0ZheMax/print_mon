@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import socket
 import threading
 import webbrowser
@@ -137,18 +138,40 @@ class PrinterDashboard:
                 listbox.insert(tk.END, item)
 
         def add_printer() -> None:
-            name = simpledialog.askstring("Добавить принтер", "Введите имя принтера:", parent=dialog)
-            if name is None:
+            raw = simpledialog.askstring(
+                "Добавить принтеры",
+                "Введите имена принтеров через запятую или пробел:",
+                parent=dialog,
+            )
+            if raw is None:
                 return
-            name = name.strip()
-            if not name:
+            names = [item.strip() for item in re.split(r"[,\s;]+", raw) if item.strip()]
+            if not names:
                 messagebox.showwarning("Пустое имя", "Имя принтера не может быть пустым.", parent=dialog)
                 return
-            if name in printers:
-                messagebox.showwarning("Дубликат", "Такой принтер уже есть в списке.", parent=dialog)
+            existing = set(printers)
+            new_names: list[str] = []
+            duplicates: list[str] = []
+            for name in names:
+                if name in existing or name in new_names:
+                    duplicates.append(name)
+                    continue
+                new_names.append(name)
+            if not new_names:
+                messagebox.showwarning(
+                    "Дубликаты",
+                    "Все указанные принтеры уже есть в списке.",
+                    parent=dialog,
+                )
                 return
-            printers.append(name)
+            printers.extend(new_names)
             update_listbox()
+            if duplicates:
+                messagebox.showinfo(
+                    "Дубликаты",
+                    "Некоторые принтеры уже есть в списке и были пропущены.",
+                    parent=dialog,
+                )
 
         def edit_printer() -> None:
             selection = listbox.curselection()
