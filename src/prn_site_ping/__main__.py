@@ -24,7 +24,13 @@ def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
 
     printers = load_printers(args.config)
-    cfg = AppConfig(printers=printers, columns=args.columns, timeout=args.timeout, title=args.title)
+    cfg = AppConfig(
+        printers=printers,
+        columns=args.columns,
+        timeout=args.timeout,
+        title=args.title,
+        config_path=args.config,
+    )
 
     state_dir = get_app_data_dir("prn-site-ping")
     app = PrinterDashboard(cfg, state_dir=state_dir)
