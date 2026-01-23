@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "prn-site-ping"
+version = "0.2.0"
+description = "Tiny Tkinter dashboard: ping printers by name and open their web UI"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [{name = "Recovered/maintained by you"}]
+keywords = ["printers", "tkinter", "ping", "dashboard"]
+
+# Tkinter/webbrowser/socket are stdlib; no runtime deps.
+dependencies = []
+
+[project.scripts]
+prn-site-ping = "prn_site_ping.__main__:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.package-data]
+prn_site_ping = ["data/*.txt"]
