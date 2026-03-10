@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import re
 import socket
+import subprocess
 import threading
 import webbrowser
 from dataclasses import dataclass
@@ -12,6 +13,7 @@ import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
 
 from .config import resolve_printers_path, write_printers_file
+from .print_server import fetch_printers_from_server
 
 
 @dataclass(frozen=True)
@@ -21,6 +23,8 @@ class AppConfig:
     timeout: float = 1.0
     title: str = "Управление принтерами"
     config_path: str | None = None
+    print_server: str | None = "dc02"
+    sync_interval: int = 300
 
 
 class PrinterDashboard:
@@ -51,6 +55,7 @@ class PrinterDashboard:
         self.printers_path = resolve_printers_path(self.cfg.config_path)
         self.buttons: dict[str, ttk.Button] = {}
         self.grid_frame: ttk.Frame | None = None
+        self._sync_in_progress = False
 
         self._build_ui()
         self._load_window_position()
@@ -80,6 +85,7 @@ class PrinterDashboard:
 
         # первичная проверка
         self.refresh_all()
+        self._schedule_server_sync(initial=True)
 
     def _render_printer_buttons(self) -> None:
         if not self.grid_frame:
@@ -123,6 +129,57 @@ class PrinterDashboard:
             self._check_printer_status_async(name)
         # убираем статус чуть позже
         self.root.after(800, lambda: self.status_var.set(""))
+
+    def _schedule_server_sync(self, initial: bool = False) -> None:
+        if not self.cfg.print_server or self.cfg.sync_interval <= 0:
+            return
+
+        delay_ms = 1000 if initial else int(self.cfg.sync_interval * 1000)
+        self.root.after(delay_ms, self._sync_printers_from_server_async)
+
+    def _sync_printers_from_server_async(self) -> None:
+        if self._sync_in_progress:
+            self._schedule_server_sync()
+            return
+
+        self._sync_in_progress = True
+
+        def worker() -> None:
+            try:
+                names = fetch_printers_from_server(self.cfg.print_server or "")
+                if names:
+                    self.root.after(0, lambda: self._apply_server_printers(names))
+            except subprocess.CalledProcessError as e:
+                logging.error(
+                    "Не удалось обновить список принтеров с сервера %s: %s",
+                    self.cfg.print_server,
+                    (e.stderr or "").strip() or e,
+                )
+            except Exception as e:
+                logging.error(
+                    "Ошибка обновления списка принтеров с сервера %s: %s",
+                    self.cfg.print_server,
+                    e,
+                )
+            finally:
+                self._sync_in_progress = False
+                self.root.after(0, self._schedule_server_sync)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_server_printers(self, names: list[str]) -> None:
+        if names == self.printers:
+            return
+
+        self.printers = names
+        self._render_printer_buttons()
+        self.refresh_all()
+        self.status_var.set("Список принтеров синхронизирован с сервером.")
+
+        try:
+            write_printers_file(self.printers_path, self.printers)
+        except Exception as e:
+            logging.error("Не удалось сохранить список принтеров после синхронизации: %s", e)
 
     def _open_settings(self) -> None:
         dialog = tk.Toplevel(self.root)
