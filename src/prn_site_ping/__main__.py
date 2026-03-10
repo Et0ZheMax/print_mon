@@ -17,6 +17,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--columns", type=int, default=3, help="Number of button columns")
     p.add_argument("--timeout", type=float, default=1.0, help="TCP connect timeout (seconds)")
     p.add_argument("--title", type=str, default="Управление принтерами", help="Window title")
+    p.add_argument("--print-server", type=str, default="dc02", help="Print server hostname (without \\)")
+    p.add_argument(
+        "--sync-interval",
+        type=int,
+        default=300,
+        help="Sync printers from print server every N seconds (0 to disable)",
+    )
     return p
 
 
@@ -30,6 +37,8 @@ def main(argv: list[str] | None = None) -> None:
         timeout=args.timeout,
         title=args.title,
         config_path=args.config,
+        print_server=args.print_server,
+        sync_interval=args.sync_interval,
     )
 
     state_dir = get_app_data_dir("prn-site-ping")
