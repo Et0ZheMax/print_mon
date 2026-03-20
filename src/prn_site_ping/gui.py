@@ -51,7 +51,7 @@ class PrinterDashboard:
         self.style.configure("Red.TButton", background="#ff6961", foreground="white")
         self.style.configure("Gray.TButton", background="#d9d9d9", foreground="black")
 
-        self.printers = list(self.cfg.printers)
+        self.printers = self._sort_printers(self.cfg.printers)
         self.printers_path = resolve_printers_path(self.cfg.config_path)
         self.buttons: dict[str, ttk.Button] = {}
         self.grid_frame: ttk.Frame | None = None
@@ -97,7 +97,7 @@ class PrinterDashboard:
         self.buttons = {}
         columns = max(1, int(self.cfg.columns))
 
-        for i, printer_name in enumerate(self.printers):
+        for i, printer_name in enumerate(self._sort_printers(self.printers)):
             btn = ttk.Button(
                 self.grid_frame,
                 text=printer_name,
@@ -112,6 +112,10 @@ class PrinterDashboard:
 
             self.grid_frame.grid_rowconfigure(row, weight=1)
             self.grid_frame.grid_columnconfigure(col, weight=1)
+
+    @staticmethod
+    def _sort_printers(printers: list[str]) -> list[str]:
+        return sorted(printers, key=lambda name: name.casefold())
 
     # ---------- Actions ----------
 
@@ -168,10 +172,11 @@ class PrinterDashboard:
         threading.Thread(target=worker, daemon=True).start()
 
     def _apply_server_printers(self, names: list[str]) -> None:
-        if names == self.printers:
+        sorted_names = self._sort_printers(names)
+        if sorted_names == self.printers:
             return
 
-        self.printers = names
+        self.printers = sorted_names
         self._render_printer_buttons()
         self.refresh_all()
         self.status_var.set("Список принтеров синхронизирован с сервером.")
@@ -187,7 +192,7 @@ class PrinterDashboard:
         dialog.transient(self.root)
         dialog.grab_set()
 
-        printers = list(self.printers)
+        printers = self._sort_printers(self.printers)
 
         def update_listbox() -> None:
             listbox.delete(0, tk.END)
@@ -222,6 +227,7 @@ class PrinterDashboard:
                 )
                 return
             printers.extend(new_names)
+            printers[:] = self._sort_printers(printers)
             update_listbox()
             if duplicates:
                 messagebox.showinfo(
@@ -253,6 +259,7 @@ class PrinterDashboard:
                 messagebox.showwarning("Дубликат", "Такой принтер уже есть в списке.", parent=dialog)
                 return
             printers[idx] = name
+            printers[:] = self._sort_printers(printers)
             update_listbox()
 
         def remove_printer() -> None:
@@ -278,13 +285,14 @@ class PrinterDashboard:
                     continue
                 seen.add(name)
                 cleaned.append(name)
+            cleaned = self._sort_printers(cleaned)
             try:
                 write_printers_file(self.printers_path, cleaned)
             except Exception as e:
                 logging.error("Ошибка при сохранении списка принтеров: %s", e)
                 messagebox.showerror("Ошибка", f"Не удалось сохранить список принтеров:\n{e}", parent=dialog)
                 return
-            self.printers = cleaned
+            self.printers = self._sort_printers(cleaned)
             self._render_printer_buttons()
             self.refresh_all()
             self.status_var.set("Список принтеров сохранён.")
