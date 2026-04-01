@@ -8,7 +8,12 @@ SRC = ROOT / "src"
 sys.path.insert(0, str(SRC))
 
 from prn_site_ping import snmp_client
-from prn_site_ping.snmp_client import DIAG_SNMP_LIB_MISSING, SnmpClient, normalize_supply_rows
+from prn_site_ping.snmp_client import (
+    DIAG_SNMP_LIB_MISSING,
+    SnmpClient,
+    _parse_supplies_table_oid,
+    normalize_supply_rows,
+)
 from prn_site_ping.models import SnmpConfig
 
 
@@ -45,3 +50,20 @@ def test_snmp_library_missing_degrades_without_crash(monkeypatch: pytest.MonkeyP
     result = client.fetch_supplies("127.0.0.1")
     assert result.ok is False
     assert result.reason == DIAG_SNMP_LIB_MISSING
+
+
+def test_parse_supplies_table_oid_keeps_full_row_index() -> None:
+    oid = "1.3.6.1.2.1.43.11.1.1.9.7.42"
+    parsed = _parse_supplies_table_oid(oid)
+    assert parsed == ("9", "7.42")
+
+
+def test_parse_supplies_table_oid_accepts_standard_entry_shape() -> None:
+    oid = "1.3.6.1.2.1.43.11.1.1.6.1.3"
+    parsed = _parse_supplies_table_oid(oid)
+    assert parsed == ("6", "1.3")
+
+
+def test_parse_supplies_table_oid_rejects_short_or_outside_tree() -> None:
+    assert _parse_supplies_table_oid("1.3.6.1.2.1.43.11.1.1.6") is None
+    assert _parse_supplies_table_oid("1.3.6.1.2.1.43.10.1.1.6.1.1") is None

@@ -18,6 +18,21 @@ SUPPLY_FIELDS = {
     "9": "level",
 }
 
+
+def _parse_supplies_table_oid(oid: str) -> tuple[str, str] | None:
+    if not oid.startswith(SUPPLIES_TABLE_BASE + "."):
+        return None
+    rest = oid[len(SUPPLIES_TABLE_BASE) + 1 :]
+    parts = rest.split(".")
+    if len(parts) < 3:
+        return None
+
+    field_id = parts[0]
+    row_index = ".".join(parts[1:])
+    if not row_index:
+        return None
+    return field_id, row_index
+
 DIAG_SNMP_DISABLED = "SNMP disabled"
 DIAG_SNMP_LIB_MISSING = "SNMP library missing"
 DIAG_SNMP_TIMEOUT = "SNMP timeout"
@@ -96,17 +111,13 @@ class SnmpClient:
                 for oid_obj, value_obj in var_binds:
                     oid = oid_obj.prettyPrint()
                     value = value_obj.prettyPrint()
-                    if not oid.startswith(SUPPLIES_TABLE_BASE + "."):
+                    parsed = _parse_supplies_table_oid(oid)
+                    if not parsed:
                         continue
-                    rest = oid[len(SUPPLIES_TABLE_BASE) + 1 :]
-                    parts = rest.split(".")
-                    if len(parts) < 3:
-                        continue
-                    field_id = parts[0]
+                    field_id, idx = parsed
                     key = SUPPLY_FIELDS.get(field_id)
                     if not key:
                         continue
-                    idx = ".".join(parts[2:])
                     rows[idx][key] = value
         except Exception as exc:
             LOGGER.error("SNMP query failed for %s: %s", host, exc)
