@@ -45,6 +45,7 @@ class SnmpTelemetryResult:
     supplies: tuple[SupplyLevel, ...] = ()
     reason: str | None = None
     partial: bool = False
+    source: str | None = None
 
 
 @dataclass(frozen=True)

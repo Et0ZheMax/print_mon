@@ -5,6 +5,15 @@ import re
 from collections import defaultdict
 
 from .models import CardSeverity, SnmpConfig, SnmpTelemetryResult, SupplyLevel
+from .snmp_adapters import AdapterRegistry
+from .snmp_identity import (
+    HR_DEVICE_DESCR_OID,
+    PRT_GENERAL_PRINTER_NAME_OID,
+    SYS_DESCR_OID,
+    SYS_OBJECT_ID_OID,
+    detect_printer_identity,
+    has_identity,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -16,6 +25,30 @@ SUPPLY_FIELDS = {
     "7": "unit",
     "8": "max",
     "9": "level",
+}
+
+IDENTITY_OIDS = (SYS_DESCR_OID, SYS_OBJECT_ID_OID, PRT_GENERAL_PRINTER_NAME_OID, HR_DEVICE_DESCR_OID)
+
+DIAG_SNMP_DISABLED = "SNMP disabled"
+DIAG_SNMP_LIB_MISSING = "SNMP library missing"
+DIAG_SNMP_TIMEOUT = "SNMP timeout"
+DIAG_SNMP_AUTH = "SNMP auth/community failed"
+DIAG_SNMP_NO_SUPPLIES = "standard printer mib supplies not available"
+DIAG_SNMP_INVALID_DATA = "invalid supplies table data"
+DIAG_SNMP_PARTIAL = "partial data only"
+DIAG_ADAPTER_NOT_MATCHED = "standard supplies unavailable; no adapter matched"
+DIAG_IDENTITY_NOT_DETECTED = "standard supplies unavailable; identity not detected"
+DIAG_ADAPTER_FAILED = "standard supplies unavailable; vendor adapter failed"
+
+COLOR_BY_TOKEN = {
+    "black": "K",
+    "cyan": "C",
+    "magenta": "M",
+    "yellow": "Y",
+    "k": "K",
+    "c": "C",
+    "m": "M",
+    "y": "Y",
 }
 
 
@@ -33,25 +66,6 @@ def _parse_supplies_table_oid(oid: str) -> tuple[str, str] | None:
         return None
     return field_id, row_index
 
-DIAG_SNMP_DISABLED = "SNMP disabled"
-DIAG_SNMP_LIB_MISSING = "SNMP library missing"
-DIAG_SNMP_TIMEOUT = "SNMP timeout"
-DIAG_SNMP_AUTH = "SNMP auth/community failed"
-DIAG_SNMP_NO_SUPPLIES = "standard printer mib supplies not available"
-DIAG_SNMP_INVALID_DATA = "invalid supplies table data"
-DIAG_SNMP_PARTIAL = "partial data only"
-
-COLOR_BY_TOKEN = {
-    "black": "K",
-    "cyan": "C",
-    "magenta": "M",
-    "yellow": "Y",
-    "k": "K",
-    "c": "C",
-    "m": "M",
-    "y": "Y",
-}
-
 
 def _import_pysnmp() -> tuple[object | None, str | None]:
     try:
@@ -62,6 +76,7 @@ def _import_pysnmp() -> tuple[object | None, str | None]:
             ObjectType,
             SnmpEngine,
             UdpTransportTarget,
+            getCmd,
             nextCmd,
         )
     except Exception:
@@ -73,6 +88,7 @@ def _import_pysnmp() -> tuple[object | None, str | None]:
         "ObjectType": ObjectType,
         "SnmpEngine": SnmpEngine,
         "UdpTransportTarget": UdpTransportTarget,
+        "getCmd": getCmd,
         "nextCmd": nextCmd,
     }, None
 
@@ -80,6 +96,7 @@ def _import_pysnmp() -> tuple[object | None, str | None]:
 class SnmpClient:
     def __init__(self, cfg: SnmpConfig):
         self.cfg = cfg
+        self.adapter_registry = AdapterRegistry()
 
     def fetch_supplies(self, host: str) -> SnmpTelemetryResult:
         if not self.cfg.enabled:
@@ -90,47 +107,138 @@ class SnmpClient:
             LOGGER.warning("SNMP library unavailable: pysnmp not installed")
             return SnmpTelemetryResult(ok=False, reason=import_error)
 
+        standard = self._fetch_standard_supplies(host, api)
+        if standard.supplies:
+            return SnmpTelemetryResult(ok=True, supplies=standard.supplies, partial=standard.partial, reason=standard.reason, source="standard_printer_mib")
+
+        identity_map = self._get_oids(host, api, IDENTITY_OIDS)
+        identity = detect_printer_identity(identity_map)
+        LOGGER.info(
+            "Identity discovery for %s: vendor=%s family=%s model=%s sysObjectID=%s",
+            host,
+            identity.vendor,
+            identity.family,
+            identity.model,
+            identity.sysobjectid,
+        )
+
+        if not has_identity(identity):
+            return SnmpTelemetryResult(ok=standard.ok, supplies=(), reason=DIAG_IDENTITY_NOT_DETECTED, source="standard_printer_mib")
+
+        adapter = self.adapter_registry.match(identity)
+        if not adapter:
+            return SnmpTelemetryResult(ok=standard.ok, supplies=(), reason=DIAG_ADAPTER_NOT_MATCHED, source="standard_printer_mib")
+
+        try:
+            adapter_result = adapter.fetch_supplies(_AdapterOps(self, host, api), identity)
+        except Exception as exc:
+            LOGGER.exception("Vendor adapter %s failed for %s", adapter.name, host)
+            return SnmpTelemetryResult(ok=standard.ok, supplies=(), reason=f"{DIAG_ADAPTER_FAILED}: {exc}", source=adapter.name)
+
+        if adapter_result.supplies:
+            LOGGER.info("Vendor adapter %s succeeded for %s with %s supplies", adapter.name, host, len(adapter_result.supplies))
+            return SnmpTelemetryResult(
+                ok=True,
+                supplies=adapter_result.supplies,
+                reason=adapter_result.reason,
+                partial=adapter_result.partial,
+                source=adapter.name,
+            )
+
+        adapter_reason = adapter_result.reason or DIAG_ADAPTER_FAILED
+        return SnmpTelemetryResult(ok=standard.ok, supplies=(), reason=f"standard supplies unavailable; {adapter_reason}", partial=adapter_result.partial, source=adapter.name)
+
+    def _fetch_standard_supplies(self, host: str, api) -> SnmpTelemetryResult:
         rows: dict[str, dict[str, str | int]] = defaultdict(dict)
+        walk_result = self._walk(host, api, SUPPLIES_TABLE_BASE)
+        if walk_result[1]:
+            return SnmpTelemetryResult(ok=False, reason=walk_result[1])
+
+        for oid, value in walk_result[0].items():
+            parsed = _parse_supplies_table_oid(oid)
+            if not parsed:
+                continue
+            field_id, idx = parsed
+            key = SUPPLY_FIELDS.get(field_id)
+            if key:
+                rows[idx][key] = value
+
+        supplies, partial, invalid_count = normalize_supply_rows(rows)
+        if not supplies:
+            reason = DIAG_SNMP_INVALID_DATA if invalid_count > 0 else DIAG_SNMP_NO_SUPPLIES
+            return SnmpTelemetryResult(ok=True, supplies=(), reason=reason, partial=partial)
+        if partial:
+            return SnmpTelemetryResult(ok=True, supplies=tuple(supplies), reason=DIAG_SNMP_PARTIAL, partial=True)
+        return SnmpTelemetryResult(ok=True, supplies=tuple(supplies), source="standard_printer_mib")
+
+    def _walk(self, host: str, api, base_oid: str) -> tuple[dict[str, str], str | None]:
+        values: dict[str, str] = {}
         try:
             iterator = api["nextCmd"](
                 api["SnmpEngine"](),
                 api["CommunityData"](self.cfg.community, mpModel=1),
                 api["UdpTransportTarget"]((host, int(self.cfg.port)), timeout=float(self.cfg.timeout), retries=int(self.cfg.retries)),
                 api["ContextData"](),
-                api["ObjectType"](api["ObjectIdentity"](SUPPLIES_TABLE_BASE)),
+                api["ObjectType"](api["ObjectIdentity"](base_oid)),
                 lexicographicMode=False,
             )
-
             for error_indication, error_status, error_index, var_binds in iterator:
                 if error_indication:
-                    return SnmpTelemetryResult(ok=False, reason=_classify_snmp_error(str(error_indication)))
+                    return {}, _classify_snmp_error(str(error_indication))
                 if error_status:
                     message = f"{error_status.prettyPrint()} at {error_index}"
-                    return SnmpTelemetryResult(ok=False, reason=_classify_snmp_error(message))
-
+                    return {}, _classify_snmp_error(message)
                 for oid_obj, value_obj in var_binds:
-                    oid = oid_obj.prettyPrint()
-                    value = value_obj.prettyPrint()
-                    parsed = _parse_supplies_table_oid(oid)
-                    if not parsed:
-                        continue
-                    field_id, idx = parsed
-                    key = SUPPLY_FIELDS.get(field_id)
-                    if not key:
-                        continue
-                    rows[idx][key] = value
+                    values[oid_obj.prettyPrint()] = value_obj.prettyPrint()
         except Exception as exc:
-            LOGGER.error("SNMP query failed for %s: %s", host, exc)
-            return SnmpTelemetryResult(ok=False, reason=_classify_snmp_error(str(exc)))
+            LOGGER.error("SNMP walk failed for %s (%s): %s", host, base_oid, exc)
+            return {}, _classify_snmp_error(str(exc))
+        return values, None
 
-        supplies, partial, invalid_count = normalize_supply_rows(rows)
-        if not supplies:
-            reason = DIAG_SNMP_INVALID_DATA if invalid_count > 0 else DIAG_SNMP_NO_SUPPLIES
-            return SnmpTelemetryResult(ok=True, supplies=(), reason=reason, partial=partial)
+    def _get_oids(self, host: str, api, oids: tuple[str, ...]) -> dict[str, str]:
+        values: dict[str, str] = {}
+        for oid in oids:
+            value, err = self._get_one(host, api, oid)
+            if err:
+                continue
+            if value is not None:
+                values[oid] = value
+        return values
 
-        if partial:
-            return SnmpTelemetryResult(ok=True, supplies=tuple(supplies), reason=DIAG_SNMP_PARTIAL, partial=True)
-        return SnmpTelemetryResult(ok=True, supplies=tuple(supplies))
+    def _get_one(self, host: str, api, oid: str) -> tuple[str | None, str | None]:
+        try:
+            iterator = api["getCmd"](
+                api["SnmpEngine"](),
+                api["CommunityData"](self.cfg.community, mpModel=1),
+                api["UdpTransportTarget"]((host, int(self.cfg.port)), timeout=float(self.cfg.timeout), retries=int(self.cfg.retries)),
+                api["ContextData"](),
+                api["ObjectType"](api["ObjectIdentity"](oid)),
+            )
+            error_indication, error_status, error_index, var_binds = next(iterator)
+            if error_indication:
+                return None, _classify_snmp_error(str(error_indication))
+            if error_status:
+                message = f"{error_status.prettyPrint()} at {error_index}"
+                return None, _classify_snmp_error(message)
+            if not var_binds:
+                return None, None
+            return var_binds[0][1].prettyPrint(), None
+        except Exception as exc:
+            return None, _classify_snmp_error(str(exc))
+
+
+class _AdapterOps:
+    def __init__(self, client: SnmpClient, host: str, api):
+        self._client = client
+        self._host = host
+        self._api = api
+
+    def walk(self, base_oid: str) -> dict[str, str]:
+        values, err = self._client._walk(self._host, self._api, base_oid)
+        if err:
+            LOGGER.info("Adapter walk failed for %s base=%s: %s", self._host, base_oid, err)
+            return {}
+        return values
 
 
 def normalize_supply_rows(rows: dict[str, dict[str, str | int]]) -> tuple[list[SupplyLevel], bool, int]:
@@ -211,7 +319,7 @@ def _is_useful_supply(desc: str, class_raw: str | int | None) -> bool:
     if any(token in normalized for token in ("toner", "ink", "cartridge")):
         return True
     class_value = _to_int(class_raw)
-    return class_value in {3, 4}  # supplyThatIsConsumed / receptacleThatIsFilled
+    return class_value in {3, 4}
 
 
 def _detect_kind(desc: str) -> str:
