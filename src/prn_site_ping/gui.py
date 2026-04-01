@@ -32,9 +32,12 @@ class AppConfig:
 
 
 def _compose_card_summary(summary: str, diagnostic: str | None) -> str:
+    base_summary = summary.strip() if summary else ""
+    if not base_summary:
+        base_summary = "SNMP: недоступен" if diagnostic else "Нет данных"
     if not diagnostic:
-        return summary
-    return f"{summary}\ndiag: {diagnostic}"
+        return base_summary
+    return f"{base_summary}\ndiag: {diagnostic}"
 
 
 class PrinterCard(ttk.Frame):
@@ -47,11 +50,12 @@ class PrinterCard(ttk.Frame):
     }
 
     def __init__(self, parent: ttk.Frame, printer_name: str, on_click) -> None:
-        super().__init__(parent, padding=8, relief="solid", borderwidth=1)
+        super().__init__(parent, padding=8, relief="solid", borderwidth=1, height=72)
         self.printer_name = printer_name
         self.on_click = on_click
 
         self.columnconfigure(0, weight=1)
+        self.grid_propagate(False)
 
         top = ttk.Frame(self)
         top.grid(row=0, column=0, sticky="ew")
@@ -64,11 +68,16 @@ class PrinterCard(ttk.Frame):
         self.dot.grid(row=0, column=1, sticky="e")
         self._dot_id = self.dot.create_oval(1, 1, 11, 11, fill="#718096", outline="")
 
-        self.summary_lbl = ttk.Label(self, text="Проверка…", foreground="#4a5568")
+        self.summary_lbl = ttk.Label(self, text="Проверка…", foreground="#4a5568", justify="left")
         self.summary_lbl.grid(row=1, column=0, sticky="w", pady=(4, 0))
         self._status_hint: str | None = None
+        self.bind("<Configure>", self._on_resize, add="+")
 
         self._bind_click_recursive(self)
+
+    def _on_resize(self, _event) -> None:
+        card_width = max(140, self.winfo_width() - 16)
+        self.summary_lbl.configure(wraplength=card_width)
 
     def _bind_click_recursive(self, widget) -> None:
         widget.bind("<Button-1>", self._on_click, add="+")
@@ -80,7 +89,8 @@ class PrinterCard(ttk.Frame):
         self.on_click(self.printer_name)
 
     def set_status(self, status: PrinterStatus) -> None:
-        color = self.COLOR_BY_SEVERITY[status.severity]
+        dot_severity = CardSeverity.OK if status.reachable and status.severity == CardSeverity.UNKNOWN else status.severity
+        color = self.COLOR_BY_SEVERITY[dot_severity]
         self.dot.itemconfigure(self._dot_id, fill=color)
         self.summary_lbl.configure(text=_compose_card_summary(status.summary_text, status.diagnostic))
         self._status_hint = status.diagnostic
@@ -115,7 +125,10 @@ class PrinterDashboard:
         self.printers = self._sort_printers(self.cfg.printers)
         self.printers_path = resolve_printers_path(self.cfg.config_path)
         self.cards: dict[str, PrinterCard] = {}
+        self.grid_canvas: tk.Canvas | None = None
         self.grid_frame: ttk.Frame | None = None
+        self.grid_scrollbar: ttk.Scrollbar | None = None
+        self._grid_canvas_window: int | None = None
         self._sync_in_progress = False
         self._status_by_printer: dict[str, PrinterStatus] = {}
 
@@ -165,8 +178,22 @@ class PrinterDashboard:
         ttk.Label(top, textvariable=self.status_var).grid(row=0, column=1, sticky="w")
         ttk.Button(top, text="Настройки", command=self._open_settings).grid(row=0, column=2, padx=(8, 0))
 
-        self.grid_frame = ttk.Frame(self.root)
-        self.grid_frame.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
+        cards_container = ttk.Frame(self.root)
+        cards_container.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
+        cards_container.rowconfigure(0, weight=1)
+        cards_container.columnconfigure(0, weight=1)
+
+        self.grid_canvas = tk.Canvas(cards_container, highlightthickness=0, borderwidth=0)
+        self.grid_canvas.grid(row=0, column=0, sticky="nsew")
+        self.grid_scrollbar = ttk.Scrollbar(cards_container, orient="vertical", command=self.grid_canvas.yview)
+        self.grid_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.grid_canvas.configure(yscrollcommand=self.grid_scrollbar.set)
+
+        self.grid_frame = ttk.Frame(self.grid_canvas)
+        self._grid_canvas_window = self.grid_canvas.create_window((0, 0), window=self.grid_frame, anchor="nw")
+        self.grid_frame.bind("<Configure>", self._on_cards_frame_configure, add="+")
+        self.grid_canvas.bind("<Configure>", self._on_cards_canvas_configure, add="+")
+
         self.root.rowconfigure(1, weight=1)
         self.root.columnconfigure(0, weight=1)
 
@@ -190,10 +217,22 @@ class PrinterDashboard:
             card = PrinterCard(self.grid_frame, printer_name, self._open_printer_web_interface)
             row = i // columns
             col = i % columns
-            card.grid(row=row, column=col, sticky="nsew", padx=5, pady=5)
+            card.grid(row=row, column=col, sticky="ew", padx=5, pady=5)
             self.cards[printer_name] = card
-            self.grid_frame.grid_rowconfigure(row, weight=1)
+            self.grid_frame.grid_rowconfigure(row, weight=0, minsize=72)
             self.grid_frame.grid_columnconfigure(col, weight=1)
+
+        self._on_cards_frame_configure()
+
+    def _on_cards_frame_configure(self, _event=None) -> None:
+        if not self.grid_canvas or not self.grid_frame:
+            return
+        self.grid_canvas.configure(scrollregion=self.grid_canvas.bbox("all"))
+
+    def _on_cards_canvas_configure(self, event) -> None:
+        if not self.grid_canvas or self._grid_canvas_window is None:
+            return
+        self.grid_canvas.itemconfigure(self._grid_canvas_window, width=event.width)
 
     @staticmethod
     def _sort_printers(printers: list[str]) -> list[str]:
