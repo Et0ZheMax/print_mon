@@ -27,11 +27,24 @@ class SnmpConfig:
 
 @dataclass(frozen=True)
 class SupplyLevel:
-    code: str
-    label: str
+    name: str
+    kind: str
+    color: str | None
     percent: int | None
-    raw_level: int | None = None
-    raw_max: int | None = None
+    level_raw: int | None = None
+    max_raw: int | None = None
+    unit: str | None = None
+    severity: CardSeverity = CardSeverity.UNKNOWN
+    is_unknown: bool = False
+    source: str = "standard_printer_mib"
+
+
+@dataclass(frozen=True)
+class SnmpTelemetryResult:
+    ok: bool
+    supplies: tuple[SupplyLevel, ...] = ()
+    reason: str | None = None
+    partial: bool = False
 
 
 @dataclass(frozen=True)
@@ -45,3 +58,4 @@ class PrinterStatus:
     summary_text: str = ""
     updated_at: datetime = field(default_factory=datetime.utcnow)
     last_error: str | None = None
+    diagnostic: str | None = None

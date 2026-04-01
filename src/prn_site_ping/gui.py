@@ -58,6 +58,7 @@ class PrinterCard(ttk.Frame):
 
         self.summary_lbl = ttk.Label(self, text="Проверка…", foreground="#4a5568")
         self.summary_lbl.grid(row=1, column=0, sticky="w", pady=(4, 0))
+        self._status_hint: str | None = None
 
         self._bind_click_recursive(self)
 
@@ -74,6 +75,7 @@ class PrinterCard(ttk.Frame):
         color = self.COLOR_BY_SEVERITY[status.severity]
         self.dot.itemconfigure(self._dot_id, fill=color)
         self.summary_lbl.configure(text=status.summary_text)
+        self._status_hint = status.diagnostic
 
         if status.severity == CardSeverity.OFFLINE:
             self.state(["disabled"])
@@ -107,6 +109,7 @@ class PrinterDashboard:
         self.cards: dict[str, PrinterCard] = {}
         self.grid_frame: ttk.Frame | None = None
         self._sync_in_progress = False
+        self._status_by_printer: dict[str, PrinterStatus] = {}
 
         self.snmp_config = self._load_snmp_settings()
         self.monitor = PrinterMonitor(timeout=self.cfg.timeout, snmp_config=self.snmp_config)
@@ -160,7 +163,7 @@ class PrinterDashboard:
         self.root.columnconfigure(0, weight=1)
 
         self._render_printer_cards()
-        self.refresh_all(force_snmp=False)
+        self.refresh_all(force_snmp=True)
         self._schedule_snmp_refresh()
         self._schedule_server_sync(initial=True)
 
@@ -221,6 +224,7 @@ class PrinterDashboard:
         card = self.cards.get(printer_name)
         if not card:
             return
+        self._status_by_printer[printer_name] = status
         card.set_status(status)
 
     def _schedule_snmp_refresh(self) -> None:
@@ -268,7 +272,7 @@ class PrinterDashboard:
             return
         self.printers = sorted_names
         self._render_printer_cards()
-        self.refresh_all(force_snmp=False)
+        self.refresh_all(force_snmp=True)
         self.status_var.set("Список принтеров синхронизирован с сервером.")
         try:
             write_printers_file(self.printers_path, self.printers)
@@ -361,7 +365,7 @@ class PrinterDashboard:
 
             self.printers = self._sort_printers(cleaned)
             self._render_printer_cards()
-            self.refresh_all(force_snmp=False)
+            self.refresh_all(force_snmp=True)
             self._schedule_snmp_refresh()
             dialog.destroy()
 

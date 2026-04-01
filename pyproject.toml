@@ -12,8 +12,8 @@ license = {text = "MIT"}
 authors = [{name = "Recovered/maintained by you"}]
 keywords = ["printers", "tkinter", "ping", "dashboard"]
 
-# Tkinter/webbrowser/socket are stdlib; no runtime deps.
-dependencies = []
+# Runtime SNMP client.
+dependencies = ["pysnmp>=4.4,<5"]
 
 [project.scripts]
 prn-site-ping = "prn_site_ping.__main__:main"
