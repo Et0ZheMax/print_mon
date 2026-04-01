@@ -29,6 +29,14 @@ class AppConfig:
     sync_interval: int = 300
 
 
+
+
+def _compose_card_summary(summary: str, diagnostic: str | None) -> str:
+    if not diagnostic:
+        return summary
+    return f"{summary}\ndiag: {diagnostic}"
+
+
 class PrinterCard(ttk.Frame):
     COLOR_BY_SEVERITY = {
         CardSeverity.OK: "#38a169",
@@ -74,7 +82,7 @@ class PrinterCard(ttk.Frame):
     def set_status(self, status: PrinterStatus) -> None:
         color = self.COLOR_BY_SEVERITY[status.severity]
         self.dot.itemconfigure(self._dot_id, fill=color)
-        self.summary_lbl.configure(text=status.summary_text)
+        self.summary_lbl.configure(text=_compose_card_summary(status.summary_text, status.diagnostic))
         self._status_hint = status.diagnostic
 
         if status.severity == CardSeverity.OFFLINE:
