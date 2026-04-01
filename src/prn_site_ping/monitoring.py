@@ -42,35 +42,37 @@ class PrinterMonitor:
 
     def build_status(self, name: str, include_snmp: bool) -> PrinterStatus:
         ip, reachable, reachability_error = self.check_reachability(name)
-        supplies: list[SupplyLevel] = []
+        supplies: tuple[SupplyLevel, ...] = ()
         snmp_ok = False
-        error_text = reachability_error
+        diagnostic = reachability_error
 
         if include_snmp and ip:
-            supplies, snmp_ok, snmp_error = self.snmp_client.fetch_supplies(ip)
-            if snmp_error:
-                LOGGER.info("SNMP failed for %s (%s): %s", name, ip, snmp_error)
-                error_text = snmp_error if not error_text else f"{error_text}; {snmp_error}"
+            telemetry = self.snmp_client.fetch_supplies(ip)
+            supplies = telemetry.supplies
+            snmp_ok = telemetry.ok
+            if telemetry.reason:
+                diagnostic = telemetry.reason if not diagnostic else f"{diagnostic}; {telemetry.reason}"
 
         severity = aggregate_severity(
             reachable=reachable,
-            supplies=supplies,
+            supplies=list(supplies),
             snmp_ok=snmp_ok,
             warning=self.snmp_config.warning_threshold,
             critical=self.snmp_config.critical_threshold,
         )
-        summary = format_supplies_summary(supplies, snmp_ok=snmp_ok)
+        summary = format_supplies_summary(list(supplies), snmp_ok=snmp_ok)
 
         return PrinterStatus(
             name=name,
             resolved_ip=ip,
             reachable=reachable,
             snmp_ok=snmp_ok,
-            supplies=tuple(supplies),
+            supplies=supplies,
             severity=severity,
             summary_text=summary,
             updated_at=datetime.utcnow(),
-            last_error=error_text,
+            last_error=diagnostic,
+            diagnostic=diagnostic,
         )
 
 
@@ -92,10 +94,14 @@ def aggregate_severity(reachable: bool, supplies: list[SupplyLevel], snmp_ok: bo
 
 def format_supplies_summary(supplies: list[SupplyLevel], snmp_ok: bool) -> str:
     if not supplies:
-        return "SNMP: нет данных" if not snmp_ok else "Расходники: нет данных"
+        return "SNMP: нет данных" if snmp_ok else "SNMP: недоступен"
+
+    colors = [item for item in supplies if item.color in {"K", "C", "M", "Y"}]
+    target = colors if colors else supplies[:4]
 
     parts: list[str] = []
-    for supply in supplies[:4]:
+    for supply in target[:4]:
+        label = supply.color or supply.name
         percent_text = "?" if supply.percent is None else str(supply.percent)
-        parts.append(f"{supply.code} {percent_text}%")
+        parts.append(f"{label} {percent_text}%")
     return " · ".join(parts)

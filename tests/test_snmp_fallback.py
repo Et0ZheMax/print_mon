@@ -7,7 +7,7 @@ SRC = ROOT / "src"
 sys.path.insert(0, str(SRC))
 
 from prn_site_ping.models import SnmpConfig
-from prn_site_ping.snmp_client import SnmpClient
+from prn_site_ping.snmp_client import DIAG_SNMP_LIB_MISSING, SnmpClient
 
 
 def test_snmp_client_graceful_when_library_missing(monkeypatch) -> None:
@@ -21,8 +21,8 @@ def test_snmp_client_graceful_when_library_missing(monkeypatch) -> None:
     monkeypatch.setattr(builtins, "__import__", fake_import)
 
     client = SnmpClient(SnmpConfig())
-    supplies, ok, err = client.fetch_supplies("127.0.0.1")
+    result = client.fetch_supplies("127.0.0.1")
 
-    assert supplies == []
-    assert ok is False
-    assert "unavailable" in (err or "")
+    assert result.supplies == ()
+    assert result.ok is False
+    assert result.reason == DIAG_SNMP_LIB_MISSING
