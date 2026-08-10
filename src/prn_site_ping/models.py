@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 
 
@@ -56,6 +56,8 @@ class PrinterStatus:
     supplies: tuple[SupplyLevel, ...] = ()
     severity: CardSeverity = CardSeverity.UNKNOWN
     summary_text: str = ""
-    updated_at: datetime = field(default_factory=datetime.utcnow)
+    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     last_error: str | None = None
     diagnostic: str | None = None
+    web_scheme: str | None = None
+    snmp_enabled: bool = True

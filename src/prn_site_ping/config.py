@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 from pathlib import Path
 from importlib import resources
 
@@ -74,7 +75,12 @@ def write_printers_file(path: Path | str, printers: list[str]) -> None:
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     content = "\n".join(printers) + ("\n" if printers else "")
-    p.write_text(content, encoding="utf-8")
+    with tempfile.NamedTemporaryFile(
+        "w", encoding="utf-8", newline="\n", dir=p.parent, delete=False
+    ) as tmp:
+        tmp.write(content)
+        temp_path = Path(tmp.name)
+    temp_path.replace(p)
 
 
 def read_printers_file(path: Path | str) -> list[str]:
@@ -103,7 +109,8 @@ def _parse_lines(lines: list[str]) -> list[str]:
     seen: set[str] = set()
     out: list[str] = []
     for p in printers:
-        if p not in seen:
-            seen.add(p)
+        key = p.casefold()
+        if key not in seen:
+            seen.add(key)
             out.append(p)
     return out

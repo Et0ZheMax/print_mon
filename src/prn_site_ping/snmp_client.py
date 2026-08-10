@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from collections import defaultdict
@@ -55,25 +56,24 @@ COLOR_BY_TOKEN = {
 
 def _import_pysnmp() -> tuple[object | None, str | None]:
     try:
-        from pysnmp.hlapi import (  # type: ignore
+        from pysnmp.hlapi.v1arch.asyncio import (  # type: ignore
             CommunityData,
-            ContextData,
             ObjectIdentity,
             ObjectType,
-            SnmpEngine,
+            SnmpDispatcher,
             UdpTransportTarget,
-            nextCmd,
+            bulk_walk_cmd,
         )
-    except Exception:
+    except Exception as exc:
+        LOGGER.warning("PySNMP import failed: %s", exc)
         return None, DIAG_SNMP_LIB_MISSING
     return {
         "CommunityData": CommunityData,
-        "ContextData": ContextData,
         "ObjectIdentity": ObjectIdentity,
         "ObjectType": ObjectType,
-        "SnmpEngine": SnmpEngine,
+        "SnmpDispatcher": SnmpDispatcher,
         "UdpTransportTarget": UdpTransportTarget,
-        "nextCmd": nextCmd,
+        "bulk_walk_cmd": bulk_walk_cmd,
     }, None
 
 
@@ -90,35 +90,10 @@ class SnmpClient:
             LOGGER.warning("SNMP library unavailable: pysnmp not installed")
             return SnmpTelemetryResult(ok=False, reason=import_error)
 
-        rows: dict[str, dict[str, str | int]] = defaultdict(dict)
         try:
-            iterator = api["nextCmd"](
-                api["SnmpEngine"](),
-                api["CommunityData"](self.cfg.community, mpModel=1),
-                api["UdpTransportTarget"]((host, int(self.cfg.port)), timeout=float(self.cfg.timeout), retries=int(self.cfg.retries)),
-                api["ContextData"](),
-                api["ObjectType"](api["ObjectIdentity"](SUPPLIES_TABLE_BASE)),
-                lexicographicMode=False,
-            )
-
-            for error_indication, error_status, error_index, var_binds in iterator:
-                if error_indication:
-                    return SnmpTelemetryResult(ok=False, reason=_classify_snmp_error(str(error_indication)))
-                if error_status:
-                    message = f"{error_status.prettyPrint()} at {error_index}"
-                    return SnmpTelemetryResult(ok=False, reason=_classify_snmp_error(message))
-
-                for oid_obj, value_obj in var_binds:
-                    oid = oid_obj.prettyPrint()
-                    value = value_obj.prettyPrint()
-                    parsed = _parse_supplies_table_oid(oid)
-                    if not parsed:
-                        continue
-                    field_id, idx = parsed
-                    key = SUPPLY_FIELDS.get(field_id)
-                    if not key:
-                        continue
-                    rows[idx][key] = value
+            rows, error = asyncio.run(self._fetch_rows(api, host))
+            if error:
+                return SnmpTelemetryResult(ok=False, reason=error)
         except Exception as exc:
             LOGGER.error("SNMP query failed for %s: %s", host, exc)
             return SnmpTelemetryResult(ok=False, reason=_classify_snmp_error(str(exc)))
@@ -131,6 +106,47 @@ class SnmpClient:
         if partial:
             return SnmpTelemetryResult(ok=True, supplies=tuple(supplies), reason=DIAG_SNMP_PARTIAL, partial=True)
         return SnmpTelemetryResult(ok=True, supplies=tuple(supplies))
+
+    async def _fetch_rows(
+        self, api: dict[str, object], host: str
+    ) -> tuple[dict[str, dict[str, str | int]], str | None]:
+        rows: dict[str, dict[str, str | int]] = defaultdict(dict)
+        target = await api["UdpTransportTarget"].create(
+            (host, int(self.cfg.port)),
+            timeout=float(self.cfg.timeout),
+            retries=max(0, int(self.cfg.retries)),
+        )
+
+        with api["SnmpDispatcher"]() as dispatcher:
+            iterator = api["bulk_walk_cmd"](
+                dispatcher,
+                api["CommunityData"](self.cfg.community),
+                target,
+                0,
+                25,
+                api["ObjectType"](api["ObjectIdentity"](SUPPLIES_TABLE_BASE)),
+                lexicographicMode=False,
+                lookupMib=False,
+                maxRows=256,
+            )
+            async for error_indication, error_status, error_index, var_binds in iterator:
+                if error_indication:
+                    return rows, _classify_snmp_error(str(error_indication))
+                if error_status:
+                    pretty = getattr(error_status, "prettyPrint", lambda: str(error_status))()
+                    return rows, _classify_snmp_error(f"{pretty} at {error_index}")
+
+                for oid_obj, value_obj in var_binds:
+                    oid = oid_obj.prettyPrint()
+                    parsed = _parse_supplies_table_oid(oid)
+                    if not parsed:
+                        continue
+                    field_id, idx = parsed
+                    key = SUPPLY_FIELDS.get(field_id)
+                    if key:
+                        rows[idx][key] = value_obj.prettyPrint()
+
+        return rows, None
 
 
 def normalize_supply_rows(rows: dict[str, dict[str, str | int]]) -> tuple[list[SupplyLevel], bool, int]:
