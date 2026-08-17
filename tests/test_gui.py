@@ -11,6 +11,7 @@ from prn_site_ping.gui import (  # noqa: E402
     PrinterCard,
     PrinterDashboard,
     _compose_card_summary,
+    _reachability_worker_count,
     _responsive_columns,
     _validated_snmp_config,
 )
@@ -39,6 +40,13 @@ def test_responsive_columns_respects_space_and_configured_maximum() -> None:
     assert _responsive_columns(500, configured_max=4) == 1
     assert _responsive_columns(960, configured_max=4) == 3
     assert _responsive_columns(2400, configured_max=4) == 4
+
+
+def test_reachability_workers_cover_typical_printer_list_in_one_wave() -> None:
+    assert _reachability_worker_count(0) == 4
+    assert _reachability_worker_count(16) == 16
+    assert _reachability_worker_count(64) == 64
+    assert _reachability_worker_count(100) == 64
 
 
 def test_snmp_settings_validate_threshold_order() -> None:

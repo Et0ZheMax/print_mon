@@ -94,6 +94,11 @@ def _responsive_columns(width: int, configured_max: int, card_min_width: int = 3
     return max(1, min(max(1, int(configured_max)), usable // max(1, card_min_width)))
 
 
+def _reachability_worker_count(printer_count: int) -> int:
+    """Run the lightweight first stage in one wave for typical installations."""
+    return max(4, min(64, int(printer_count) or 4))
+
+
 def _validated_snmp_config(
     *,
     enabled: bool,
@@ -365,7 +370,7 @@ class PrinterDashboard:
 
         self.snmp_config = self._load_snmp_settings()
         self.monitor = PrinterMonitor(timeout=self.cfg.timeout, snmp_config=self.snmp_config)
-        worker_count = max(4, min(24, len(self.printers) or 4))
+        worker_count = _reachability_worker_count(len(self.printers))
         self.executor = ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="printer-monitor")
         snmp_worker_count = max(2, min(8, len(self.printers) or 2))
         self.snmp_executor = ThreadPoolExecutor(

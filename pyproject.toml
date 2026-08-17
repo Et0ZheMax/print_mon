@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "prn-site-ping"
-version = "0.4.0"
+version = "0.4.1"
 description = "Tiny Tkinter dashboard: ping printers by name and open their web UI"
 readme = "README.md"
 requires-python = ">=3.11"
