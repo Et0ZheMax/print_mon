@@ -9,7 +9,7 @@ import tempfile
 import time
 import webbrowser
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Callable
 
@@ -231,7 +231,7 @@ class PrinterCard(tk.Frame):
 
     def set_loading(self, loading: bool) -> None:
         if loading:
-            self.detail_label.configure(text="Обновление данных…", fg=PALETTE["primary"])
+            self.detail_label.configure(text="Проверка доступности…", fg=PALETTE["primary"])
 
     def set_status(self, status: PrinterStatus) -> None:
         severity = status.severity
@@ -245,18 +245,38 @@ class PrinterCard(tk.Frame):
         ip_text = status.resolved_ip or "IP не определён"
         updated = status.updated_at.astimezone().strftime("%H:%M:%S")
         self.meta_label.configure(text=f"{ip_text}   •   обновлено {updated}")
-        self._render_supplies(status.supplies, enabled=status.snmp_enabled)
+        self._render_supplies(
+            status.supplies,
+            enabled=status.snmp_enabled,
+            pending=status.snmp_pending,
+        )
 
         diagnostic = _humanize_diagnostic(status.diagnostic)
-        detail = diagnostic or status.summary_text or (
-            "Веб-интерфейс доступен" if status.reachable else "Устройство недоступно"
-        )
+        if status.snmp_pending:
+            availability = diagnostic or (
+                "Доступность определена" if status.reachable else "Веб-интерфейс недоступен"
+            )
+            detail = f"{availability} · получаем данные SNMP…"
+        else:
+            detail = diagnostic or status.summary_text or (
+                "Веб-интерфейс доступен" if status.reachable else "Устройство недоступно"
+            )
         self.detail_label.configure(
             text=detail,
-            fg=PALETTE["critical"] if not status.reachable else PALETTE["muted"],
+            fg=(
+                PALETTE["primary"]
+                if status.snmp_pending
+                else PALETTE["critical"] if not status.reachable else PALETTE["muted"]
+            ),
         )
 
-    def _render_supplies(self, supplies: tuple[SupplyLevel, ...], *, enabled: bool = True) -> None:
+    def _render_supplies(
+        self,
+        supplies: tuple[SupplyLevel, ...],
+        *,
+        enabled: bool = True,
+        pending: bool = False,
+    ) -> None:
         for child in self.supplies_frame.winfo_children():
             child.destroy()
 
@@ -264,6 +284,19 @@ class PrinterCard(tk.Frame):
             self.supplies_frame.grid_remove()
             return
         self.supplies_frame.grid()
+
+        if pending:
+            loading = tk.Label(
+                self.supplies_frame,
+                text="Расходники: опрос SNMP…",
+                bg=PALETTE["surface"],
+                fg=PALETTE["primary"],
+                font=("Segoe UI", 9),
+                anchor="w",
+            )
+            loading.pack(fill="x")
+            self._bind_interactions(loading)
+            return
 
         target = [item for item in supplies if item.color in {"K", "C", "M", "Y"}]
         if not target:
@@ -334,13 +367,23 @@ class PrinterDashboard:
         self.monitor = PrinterMonitor(timeout=self.cfg.timeout, snmp_config=self.snmp_config)
         worker_count = max(4, min(24, len(self.printers) or 4))
         self.executor = ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="printer-monitor")
+        snmp_worker_count = max(2, min(8, len(self.printers) or 2))
+        self.snmp_executor = ThreadPoolExecutor(
+            max_workers=snmp_worker_count,
+            thread_name_prefix="printer-snmp",
+        )
         self._events: queue.SimpleQueue[tuple] = queue.SimpleQueue()
         self._closing = False
         self._render_revision = 0
         self._active_refresh_revision = 0
         self._refresh_pending: set[str] = set()
+        self._reachability_pending: set[str] = set()
+        self._snmp_pending: set[str] = set()
         self._refresh_total = 0
         self._refresh_completed = 0
+        self._reachability_completed = 0
+        self._snmp_completed = 0
+        self._snmp_requested = False
         self._refresh_started = 0.0
         self._queued_refresh = False
         self._sync_in_progress = False
@@ -609,23 +652,46 @@ class PrinterDashboard:
         revision = self._render_revision
         self._active_refresh_revision = revision
         self._refresh_pending = set(names)
+        self._reachability_pending = set(names)
+        self._snmp_pending.clear()
         self._refresh_total = len(names)
         self._refresh_completed = 0
+        self._reachability_completed = 0
+        self._snmp_completed = 0
+        self._snmp_requested = bool(force_snmp and self.snmp_config.enabled)
         self._refresh_started = time.monotonic()
         self.refresh_button.state(["disabled"])
-        self.progress.configure(maximum=len(names), value=0)
-        self.status_var.set(f"Проверка устройств: 0 из {len(names)}")
+        work_units = len(names) * (2 if self._snmp_requested else 1)
+        self.progress.configure(maximum=work_units, value=0)
+        self.status_var.set(f"Проверка доступности: 0 из {len(names)}")
 
         for name in names:
             self.cards[name].set_loading(True)
-            future = self.executor.submit(self.monitor.build_status, name, force_snmp)
-            future.add_done_callback(lambda done, n=name, rev=revision: self._queue_status_result(done, n, rev))
+            future = self.executor.submit(
+                self.monitor.build_reachability_status,
+                name,
+                self._snmp_requested,
+            )
+            future.add_done_callback(
+                lambda done, n=name, rev=revision: self._queue_monitor_result(
+                    done,
+                    "reachability",
+                    n,
+                    rev,
+                )
+            )
 
-    def _queue_status_result(self, future: Future, printer_name: str, revision: int) -> None:
+    def _queue_monitor_result(
+        self,
+        future: Future,
+        stage: str,
+        printer_name: str,
+        revision: int,
+    ) -> None:
         try:
-            self._events.put(("status", revision, printer_name, future.result(), None))
+            self._events.put((stage, revision, printer_name, future.result(), None))
         except Exception as exc:
-            self._events.put(("status", revision, printer_name, None, exc))
+            self._events.put((stage, revision, printer_name, None, exc))
 
     def _poll_worker_events(self) -> None:
         if self._closing:
@@ -638,29 +704,31 @@ class PrinterDashboard:
                 break
             processed += 1
             kind = event[0]
-            if kind == "status":
+            if kind == "reachability":
                 _, revision, name, status, error = event
-                self._handle_status_result(revision, name, status, error)
+                self._handle_reachability_result(revision, name, status, error)
+            elif kind == "snmp":
+                _, revision, name, status, error = event
+                self._handle_snmp_result(revision, name, status, error)
             elif kind == "server_sync":
                 _, names, error = event
                 self._handle_server_sync_result(names, error)
         self._poll_job = self.root.after(50, self._poll_worker_events)
 
-    def _handle_status_result(
+    def _handle_reachability_result(
         self,
         revision: int,
         printer_name: str,
         status: PrinterStatus | None,
         error: Exception | None,
     ) -> None:
-        if revision != self._active_refresh_revision or printer_name not in self._refresh_pending:
+        if revision != self._active_refresh_revision or printer_name not in self._reachability_pending:
             return
-        self._refresh_pending.discard(printer_name)
-        self._refresh_completed += 1
-        self.progress.configure(value=self._refresh_completed)
+        self._reachability_pending.discard(printer_name)
+        self._reachability_completed += 1
         if error:
             logging.error(
-                "Monitor task crashed for %s: %s",
+                "Reachability task crashed for %s: %s",
                 printer_name,
                 error,
                 exc_info=(type(error), error, error.__traceback__),
@@ -668,14 +736,89 @@ class PrinterDashboard:
             card = self.cards.get(printer_name)
             if card:
                 card.detail_label.configure(text="Ошибка фоновой проверки", fg=PALETTE["critical"])
-        elif status is not None and revision == self._render_revision:
+            self._refresh_pending.discard(printer_name)
+            if self._snmp_requested:
+                self._snmp_completed += 1
+        elif status is not None:
             self._apply_status(printer_name, status, revision)
 
-        remaining = len(self._refresh_pending)
-        if remaining:
-            self.status_var.set(f"Проверка устройств: {self._refresh_completed} из {self._refresh_total}")
-        else:
+            if self._snmp_requested and status.snmp_pending:
+                self._snmp_pending.add(printer_name)
+                future = self.snmp_executor.submit(self.monitor.enrich_status_with_snmp, status)
+                future.add_done_callback(
+                    lambda done, n=printer_name, rev=revision: self._queue_monitor_result(
+                        done,
+                        "snmp",
+                        n,
+                        rev,
+                    )
+                )
+            else:
+                self._refresh_pending.discard(printer_name)
+                if self._snmp_requested:
+                    self._snmp_completed += 1
+
+        self._refresh_completed = self._reachability_completed + self._snmp_completed
+        self._update_refresh_progress()
+        if not self._refresh_pending:
             self._finish_refresh()
+
+    def _handle_snmp_result(
+        self,
+        revision: int,
+        printer_name: str,
+        status: PrinterStatus | None,
+        error: Exception | None,
+    ) -> None:
+        if revision != self._active_refresh_revision or printer_name not in self._snmp_pending:
+            return
+        self._snmp_pending.discard(printer_name)
+        self._refresh_pending.discard(printer_name)
+        self._snmp_completed += 1
+        self._refresh_completed = self._reachability_completed + self._snmp_completed
+
+        if error:
+            logging.error(
+                "SNMP task crashed for %s: %s",
+                printer_name,
+                error,
+                exc_info=(type(error), error, error.__traceback__),
+            )
+            current = self._status_by_printer.get(printer_name)
+            if current is not None:
+                self._apply_status(
+                    printer_name,
+                    replace(
+                        current,
+                        snmp_pending=False,
+                        summary_text="SNMP: ошибка опроса",
+                        diagnostic=str(error),
+                    ),
+                    revision,
+                )
+        elif status is not None:
+            self._apply_status(printer_name, status, revision)
+
+        self._update_refresh_progress()
+        if not self._refresh_pending:
+            self._finish_refresh()
+
+    def _update_refresh_progress(self) -> None:
+        self.progress.configure(value=self._refresh_completed)
+        if self._reachability_pending:
+            if self._snmp_requested:
+                self.status_var.set(
+                    f"Доступность: {self._reachability_completed} из {self._refresh_total}"
+                    f" · SNMP: {self._snmp_completed} из {self._refresh_total}"
+                )
+            else:
+                self.status_var.set(
+                    f"Проверка доступности: {self._reachability_completed} из {self._refresh_total}"
+                )
+        elif self._snmp_pending:
+            self.status_var.set(
+                f"Доступность показана · SNMP: {self._snmp_completed} из {self._refresh_total}"
+            )
 
     def _apply_status(self, printer_name: str, status: PrinterStatus, revision: int) -> None:
         if revision != self._render_revision:
@@ -690,7 +833,10 @@ class PrinterDashboard:
     def _finish_refresh(self) -> None:
         elapsed = time.monotonic() - self._refresh_started
         self.refresh_button.state(["!disabled"])
-        self.status_var.set(f"Проверка завершена за {elapsed:.1f} с")
+        if self._snmp_requested:
+            self.status_var.set(f"Доступность и SNMP обновлены за {elapsed:.1f} с")
+        else:
+            self.status_var.set(f"Доступность обновлена за {elapsed:.1f} с")
         self._update_summary()
         self._reflow_cards()
         if self._queued_refresh:
@@ -917,6 +1063,7 @@ class PrinterDashboard:
                 except tk.TclError:
                     pass
         self.executor.shutdown(wait=False, cancel_futures=True)
+        self.snmp_executor.shutdown(wait=False, cancel_futures=True)
         self.root.destroy()
 
     def _save_window_position(self) -> None:

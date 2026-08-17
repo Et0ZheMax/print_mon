@@ -61,3 +61,4 @@ class PrinterStatus:
     diagnostic: str | None = None
     web_scheme: str | None = None
     snmp_enabled: bool = True
+    snmp_pending: bool = False

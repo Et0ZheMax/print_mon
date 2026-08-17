@@ -6,7 +6,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 sys.path.insert(0, str(SRC))
 
-from prn_site_ping.models import CardSeverity, SnmpConfig, SupplyLevel
+from prn_site_ping.models import CardSeverity, SnmpConfig, SnmpTelemetryResult, SupplyLevel
 from prn_site_ping.monitoring import PrinterMonitor, aggregate_severity, format_supplies_summary
 
 
@@ -94,3 +94,50 @@ def test_disabled_snmp_does_not_report_missing_details(monkeypatch) -> None:
     assert status.severity == CardSeverity.OK
     assert status.summary_text == ""
     assert status.diagnostic is None
+
+
+def test_reachability_stage_returns_before_snmp(monkeypatch) -> None:
+    monitor = PrinterMonitor(1.0, SnmpConfig(enabled=True))
+    monkeypatch.setattr(
+        monitor,
+        "check_reachability",
+        lambda _name: ("192.0.2.10", True, None),
+    )
+    monkeypatch.setattr(
+        monitor.snmp_client,
+        "fetch_supplies",
+        lambda _host: (_ for _ in ()).throw(AssertionError("SNMP started during fast stage")),
+    )
+
+    status = monitor.build_reachability_status("PRN-1", expect_snmp=True)
+
+    assert status.reachable is True
+    assert status.severity == CardSeverity.OK
+    assert status.snmp_pending is True
+    assert status.summary_text == "SNMP: опрос…"
+
+
+def test_snmp_stage_enriches_existing_reachability_status(monkeypatch) -> None:
+    monitor = PrinterMonitor(1.0, SnmpConfig(enabled=True))
+    monkeypatch.setattr(
+        monitor,
+        "check_reachability",
+        lambda _name: ("192.0.2.10", True, None),
+    )
+    supplies = (SupplyLevel(name="Black", kind="toner", color="K", percent=8),)
+    monkeypatch.setattr(
+        monitor.snmp_client,
+        "fetch_supplies",
+        lambda _host: SnmpTelemetryResult(ok=True, supplies=supplies),
+    )
+
+    initial = monitor.build_reachability_status("PRN-1", expect_snmp=True)
+    enriched = monitor.enrich_status_with_snmp(initial)
+
+    assert initial.snmp_pending is True
+    assert enriched.snmp_pending is False
+    assert enriched.reachable is True
+    assert enriched.snmp_ok is True
+    assert enriched.supplies == supplies
+    assert enriched.severity == CardSeverity.CRITICAL
+    assert enriched.summary_text == "K 8%"
